@@ -1,0 +1,103 @@
+# github actions workflow file to handle the nightly build, test, and Docker image push to GitHub Container Registry
+name: Nightly Build
+
+# runs every night at 12am UTC, can also be triggered manually from the Actions tab (for testing in my demo video)
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+
+    # dummy env vars so the app config loads without a real .env file during tests
+    env:
+      DATABASE_URL: postgresql+asyncpg://test:test@localhost/testdb
+      JWT_SECRET: ci-test-secret
+      JWT_ALGORITHM: HS256
+      REDIS_URL: redis://localhost:6379/0
+      MAIL_USERNAME: test
+      MAIL_PASSWORD: test
+      MAIL_FROM: test@example.com
+      MAIL_PORT: 587
+      MAIL_SERVER: smtp.example.com
+      MAIL_FROM_NAME: Test
+      DOMAIN: localhost
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run tests
+        id: tests
+        run: pytest src/tests/ -v
+
+      # only runs if tests passed
+      - name: Log in to GitHub Container Registry
+        if: steps.tests.outcome == 'success'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # builds and pushes the image — only runs if tests passed
+      - name: Build and push Docker image
+        if: steps.tests.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:nightly
+            ghcr.io/${{ github.repository }}:nightly-${{ github.run_number }}
+
+      # only runs if any previous step failed — image will NOT have been pushed
+      - name: Send failure email
+        if: failure()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 << 'EOF'
+          import smtplib, os
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          msg = MIMEMultipart('alternative')
+          msg['Subject'] = f"[{os.environ['REPO']}] Nightly Build FAILED"
+          msg['From'] = os.environ['SMTP_FROM']
+          msg['To'] = os.environ['NOTIFICATION_EMAIL']
+
+          body = f"""
+          <h2>Nightly Build Failed</h2>
+          <p><b>Repo:</b> {os.environ['REPO']}</p>
+          <p><b>The nightly build failed.</b> The Docker image was NOT pushed to the registry.</p>
+          <p><b>Details:</b> <a href="{os.environ['RUN_URL']}">View run logs</a></p>
+          <p>Please check the failing tests and fix them before the next nightly build.</p>
+          """
+          msg.attach(MIMEText(body, 'html'))
+
+          with smtplib.SMTP(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT'])) as s:
+              s.starttls()
+              s.login(os.environ['SMTP_USERNAME'], os.environ['SMTP_PASSWORD'])
+              s.sendmail(os.environ['SMTP_FROM'], os.environ['NOTIFICATION_EMAIL'], msg.as_string())
+          print("Failure email sent.")
+          EOF
