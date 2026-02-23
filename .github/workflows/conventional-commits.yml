@@ -1,0 +1,87 @@
+# github automatically detects any .yml file inside the /github/workflows directory and treats it as an automated pipeline
+name: Conventional Commits Check
+
+#when this code runs, it tells github to run the workflow whenever someone opens, edits, or reopens a pull request in the repo
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = context.payload.pull_request.title;
+            const pattern = /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+/;
+            const valid = pattern.test(title);
+            core.setOutput('valid', valid.toString());
+            core.info(`Title: "${title}" — Valid: ${valid}`);
+
+      - name: Close PR and comment if invalid
+        if: steps.validate.outputs.valid == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## Conventional Commits Violation\n\nPR title **"${context.payload.pull_request.title}"** does not follow the [Conventional Commits](https://www.conventionalcommits.org/) spec.\n\n**Format:** \`type(scope): description\`\n\n**Valid types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert\n\n**Examples:**\n- \`feat: add login endpoint\`\n- \`fix(auth): resolve token expiry\`\n\nPlease fix the title and reopen.`
+            });
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              state: 'closed'
+            });
+
+      - name: Send email notification if invalid
+        if: steps.validate.outputs.valid == 'false'
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'EOF'
+          import smtplib, os
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          msg = MIMEMultipart('alternative')
+          msg['Subject'] = f"[{os.environ['REPO']}] PR Closed: Conventional Commits Violation"
+          msg['From'] = os.environ['SMTP_FROM']
+          msg['To'] = os.environ['NOTIFICATION_EMAIL']
+
+          body = f"""
+          <h2> PR Closed — Conventional Commits Violation</h2>
+          <p><b>Repo:</b> {os.environ['REPO']}</p>
+          <p><b>Author:</b> {os.environ['PR_AUTHOR']}</p>
+          <p><b>Invalid title:</b> {os.environ['PR_TITLE']}</p>
+          <p><b>PR URL:</b> <a href="{os.environ['PR_URL']}">{os.environ['PR_URL']}</a></p>
+          <p>The PR was automatically closed. Valid format: <code>type(scope): description</code></p>
+          """
+          msg.attach(MIMEText(body, 'html'))
+
+          with smtplib.SMTP(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT'])) as s:
+              s.starttls()
+              s.login(os.environ['SMTP_USERNAME'], os.environ['SMTP_PASSWORD'])
+              s.sendmail(os.environ['SMTP_FROM'], os.environ['NOTIFICATION_EMAIL'], msg.as_string())
+          print("Email sent.")
+          EOF
