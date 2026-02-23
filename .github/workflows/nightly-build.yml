@@ -32,6 +32,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # docker requires image names to be lowercase, so we convert the repo name
+      - name: Set lowercase repository name
+        run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -60,8 +64,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:nightly
-            ghcr.io/${{ github.repository }}:nightly-${{ github.run_number }}
+            ghcr.io/${{ env.REPO_LOWER }}:nightly
+            ghcr.io/${{ env.REPO_LOWER }}:nightly-${{ github.run_number }}
 
       # only runs if any previous step failed — image will NOT have been pushed
       - name: Send failure email
